@@ -2134,6 +2134,10 @@ impl<'a> Face<'a> {
     /// `gvar`, `glyf`, `CFF` and `CFF2` tables are supported.
     /// And they will be accessed in this specific order.
     ///
+    /// For a detailed walkthrough of the dispatch order, the callback contract
+    /// and the bounding-box semantics, see `docs/outline-glyph.md` in the
+    /// repository.
+    ///
     /// This method is affected by variation axes.
     ///
     /// Returns `None` when glyph has no outline or on error.

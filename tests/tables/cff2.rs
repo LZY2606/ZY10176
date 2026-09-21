@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use ttf_parser::{cff2, CFFError, GlyphId, Rect};
+use ttf_parser::{cff2, CFFError, GlyphId, NormalizedCoordinate, Rect};
 
 struct Builder(String);
 
@@ -127,11 +127,12 @@ fn index(objects: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-// An ItemVariationStore with `regions` regions and a single ItemVariationData
-// that references all of them, preceded by the u16 length field CFF2 requires.
-fn variation_store(regions: u16) -> Vec<u8> {
+// An ItemVariationStore with one (start, peak, end) F2DOT14 region per entry and a
+// single ItemVariationData that references all of them, preceded by the u16 length
+// field CFF2 requires.
+fn variation_store(regions: &[(i16, i16, i16)]) -> Vec<u8> {
     const HEADER_LEN: usize = 12; // format + regionListOffset + count + one offset
-    let region_list_len = 4 + 6 * usize::from(regions);
+    let region_list_len = 4 + 6 * regions.len();
     let region_list_offset = HEADER_LEN;
     let variation_data_offset = HEADER_LEN + region_list_len;
 
@@ -143,19 +144,19 @@ fn variation_store(regions: u16) -> Vec<u8> {
 
     // VariationRegionList
     store.extend_from_slice(&1u16.to_be_bytes()); // axisCount
-    store.extend_from_slice(&regions.to_be_bytes()); // regionCount
-    for _ in 0..regions {
-        store.extend_from_slice(&0i16.to_be_bytes()); // startCoord
-        store.extend_from_slice(&0i16.to_be_bytes()); // peakCoord
-        store.extend_from_slice(&0i16.to_be_bytes()); // endCoord
+    store.extend_from_slice(&(regions.len() as u16).to_be_bytes()); // regionCount
+    for &(start, peak, end) in regions {
+        store.extend_from_slice(&start.to_be_bytes());
+        store.extend_from_slice(&peak.to_be_bytes());
+        store.extend_from_slice(&end.to_be_bytes());
     }
 
     // ItemVariationData
     store.extend_from_slice(&0u16.to_be_bytes()); // itemCount
     store.extend_from_slice(&0u16.to_be_bytes()); // wordDeltaCount
-    store.extend_from_slice(&regions.to_be_bytes()); // regionIndexCount
-    for i in 0..regions {
-        store.extend_from_slice(&i.to_be_bytes());
+    store.extend_from_slice(&(regions.len() as u16).to_be_bytes()); // regionIndexCount
+    for i in 0..regions.len() {
+        store.extend_from_slice(&(i as u16).to_be_bytes());
     }
 
     let mut out = Vec::new();
@@ -171,7 +172,7 @@ fn variation_store(regions: u16) -> Vec<u8> {
 struct Cff2 {
     /// `None` omits the Top DICT `vstore` entry entirely, which the CFF2 spec allows:
     /// a static CFF2 font has no variation data.
-    regions: Option<u16>,
+    regions: Option<Vec<(i16, i16, i16)>>,
     global_subrs: Vec<Vec<u8>>,
     local_subrs: Vec<Vec<u8>>,
     char_strings: Vec<Vec<u8>>,
@@ -180,7 +181,8 @@ struct Cff2 {
 impl Cff2 {
     fn new(char_strings: Vec<Vec<u8>>) -> Self {
         Cff2 {
-            regions: Some(1),
+            // A degenerate (0, 0, 0) region always evaluates to a scalar of 1.0.
+            regions: Some(vec![(0, 0, 0)]),
             global_subrs: Vec::new(),
             local_subrs: Vec::new(),
             char_strings,
@@ -201,7 +203,11 @@ impl Cff2 {
 
         let global_subrs = index(&self.global_subrs);
         let local_subrs = index(&self.local_subrs);
-        let variation_store = self.regions.map(variation_store).unwrap_or_default();
+        let variation_store = self
+            .regions
+            .as_ref()
+            .map(|regions| variation_store(regions))
+            .unwrap_or_default();
         let char_strings = index(&self.char_strings);
 
         let global_subrs_offset = HEADER_LEN + top_dict_len;
@@ -395,6 +401,47 @@ fn blend_applies_region_deltas_to_its_operands() {
 
     assert_eq!(path, "M 110 0 L 160 50 ");
     assert_eq!(result.unwrap(), rect(110, 0, 160, 50));
+}
+
+// The region scalar comes from the current variation coordinates, so the same
+// charstring outlines differently at different coordinates. With a region of
+// (0, +1, +1) on a single axis the scalar equals the coordinate itself.
+#[test]
+fn blend_scales_deltas_by_the_current_variation_coordinates() {
+    let mut char_string = Vec::new();
+    char_string.extend_from_slice(&cs_int(100));
+    char_string.extend_from_slice(&cs_int(10));
+    char_string.extend_from_slice(&cs_int(1));
+    char_string.push(operator::BLEND);
+    char_string.push(operator::HORIZONTAL_MOVE_TO);
+    char_string.extend_from_slice(&cs_int(50));
+    char_string.extend_from_slice(&cs_int(50));
+    char_string.push(operator::LINE_TO);
+
+    let mut font = Cff2::new(vec![char_string]);
+    font.regions = Some(vec![(0, 0x4000, 0x4000)]); // (start, peak, end) = (0, +1, +1)
+    let data = font.build();
+    let table = cff2::Table::parse(&data).unwrap();
+
+    let mut outline_at = |coord: f32| {
+        let mut builder = Builder(String::new());
+        let result =
+            table.outline(&[NormalizedCoordinate::from(coord)], GlyphId(0), &mut builder);
+        (result, builder.0)
+    };
+
+    // `100 10 1 blend` leaves 100 + 10 * scalar on the stack.
+    let (result, path) = outline_at(1.0);
+    assert_eq!(path, "M 110 0 L 160 50 ");
+    assert_eq!(result.unwrap(), rect(110, 0, 160, 50));
+
+    let (result, path) = outline_at(0.5);
+    assert_eq!(path, "M 105 0 L 155 50 ");
+    assert_eq!(result.unwrap(), rect(105, 0, 155, 50));
+
+    let (result, path) = outline_at(0.0);
+    assert_eq!(path, "M 100 0 L 150 50 ");
+    assert_eq!(result.unwrap(), rect(100, 0, 150, 50));
 }
 
 #[test]

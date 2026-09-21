@@ -66,14 +66,25 @@ impl ttf_parser::OutlineBuilder for CountingBuilder {
     fn close(&mut self) {}
 }
 
-// Glyph 0: one closed contour (10,10) -> (30,10) -> (30,30).
 fn diamond_leaf_glyph() -> Vec<u8> {
+    diamond_leaf_glyph_with_stored_bbox(10, 10, 30, 30)
+}
+
+// Glyph 0: one closed contour (10,10) -> (30,10) -> (30,30).
+// The bbox stored in the glyph header is a parameter so tests can make it
+// disagree with the actual points on purpose.
+fn diamond_leaf_glyph_with_stored_bbox(
+    x_min: i16,
+    y_min: i16,
+    x_max: i16,
+    y_max: i16,
+) -> Vec<u8> {
     let mut glyph = Vec::new();
     glyph.extend_from_slice(&1i16.to_be_bytes());  // numberOfContours
-    glyph.extend_from_slice(&10i16.to_be_bytes()); // xMin
-    glyph.extend_from_slice(&10i16.to_be_bytes()); // yMin
-    glyph.extend_from_slice(&30i16.to_be_bytes()); // xMax
-    glyph.extend_from_slice(&30i16.to_be_bytes()); // yMax
+    glyph.extend_from_slice(&x_min.to_be_bytes());
+    glyph.extend_from_slice(&y_min.to_be_bytes());
+    glyph.extend_from_slice(&x_max.to_be_bytes());
+    glyph.extend_from_slice(&y_max.to_be_bytes());
     glyph.extend_from_slice(&2u16.to_be_bytes());  // endPtsOfContours[0], so 3 points
     glyph.extend_from_slice(&0u16.to_be_bytes());  // instructionLength
     // ON_CURVE | X_SHORT | Y_SHORT | X_POSITIVE_SHORT | Y_POSITIVE_SHORT
@@ -83,10 +94,31 @@ fn diamond_leaf_glyph() -> Vec<u8> {
     glyph
 }
 
-// A composite glyph with `branching` components, all referencing `child`.
-fn diamond_composite_glyph(child: u16, branching: u16) -> Vec<u8> {
+// One component of a composite glyph. `scale_f2dot14` sets WE_HAVE_A_SCALE;
+// 1.0 is 0x4000, so 1.5 is 0x6000 (F2DOT14 cannot represent +2.0).
+#[derive(Clone)]
+struct Component {
+    glyph_id: u16,
+    dx: i16,
+    dy: i16,
+    scale_f2dot14: Option<i16>,
+}
+
+impl Component {
+    fn translate(glyph_id: u16, dx: i16, dy: i16) -> Self {
+        Component { glyph_id, dx, dy, scale_f2dot14: None }
+    }
+
+    fn scaled(glyph_id: u16, dx: i16, dy: i16, scale_f2dot14: i16) -> Self {
+        Component { glyph_id, dx, dy, scale_f2dot14: Some(scale_f2dot14) }
+    }
+}
+
+// A composite glyph assembled from `components`, in order.
+fn composite_glyph(components: &[Component]) -> Vec<u8> {
     const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
     const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+    const WE_HAVE_A_SCALE: u16 = 0x0008;
     const MORE_COMPONENTS: u16 = 0x0020;
 
     let mut glyph = Vec::new();
@@ -96,17 +128,28 @@ fn diamond_composite_glyph(child: u16, branching: u16) -> Vec<u8> {
     glyph.extend_from_slice(&30i16.to_be_bytes());   // xMax
     glyph.extend_from_slice(&30i16.to_be_bytes());   // yMax
 
-    for i in 0..branching {
+    for (i, component) in components.iter().enumerate() {
         let mut flags = ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES;
-        if i + 1 < branching {
+        if component.scale_f2dot14.is_some() {
+            flags |= WE_HAVE_A_SCALE;
+        }
+        if i + 1 < components.len() {
             flags |= MORE_COMPONENTS;
         }
         glyph.extend_from_slice(&flags.to_be_bytes());
-        glyph.extend_from_slice(&child.to_be_bytes());
-        glyph.extend_from_slice(&0i16.to_be_bytes()); // dx
-        glyph.extend_from_slice(&0i16.to_be_bytes()); // dy
+        glyph.extend_from_slice(&component.glyph_id.to_be_bytes());
+        glyph.extend_from_slice(&component.dx.to_be_bytes());
+        glyph.extend_from_slice(&component.dy.to_be_bytes());
+        if let Some(scale) = component.scale_f2dot14 {
+            glyph.extend_from_slice(&scale.to_be_bytes());
+        }
     }
     glyph
+}
+
+// A composite glyph with `branching` components, all referencing `child`.
+fn diamond_composite_glyph(child: u16, branching: u16) -> Vec<u8> {
+    composite_glyph(&vec![Component::translate(child, 0, 0); branching as usize])
 }
 
 /// Builds a font where glyph 0 is a simple leaf and glyphs `1..=depth` are each
@@ -117,7 +160,13 @@ fn diamond_font(branching: u16, depth: u16) -> Vec<u8> {
     for level in 1..=depth {
         glyphs.push(diamond_composite_glyph(level - 1, branching));
     }
+    font(glyphs)
+}
 
+/// Builds a minimal TrueType font (head, hhea, maxp, loca, glyf) from raw
+/// glyph data. A zero-length glyph produces an empty `loca` range, which is
+/// how real fonts encode glyphs without any outline data.
+fn font(glyphs: Vec<Vec<u8>>) -> Vec<u8> {
     let number_of_glyphs = glyphs.len() as u16;
 
     let mut glyf = Vec::new();
@@ -245,4 +294,106 @@ fn diamond_leaf_glyph_outlines_a_single_contour() {
     // The glyf builder closes a contour with an explicit line back to its start.
     assert_eq!(builder.0, "M 10 10 L 30 10 L 30 30 L 10 10 Z ");
     assert_eq!(bbox, Some(ttf_parser::Rect { x_min: 10, y_min: 10, x_max: 30, y_max: 30 }));
+}
+
+// Nested component transforms compose as `Transform::combine(outer, inner)`, i.e. a
+// point is mapped by the inner (child) transform first and the outer (parent) transform
+// second. A direct consequence: an inner component's dx/dy offset IS scaled by an outer
+// component's scale. If the multiplication order were reversed, the offset would survive
+// unscaled and this test would see (25,19) -> (55,19) -> (55,49) instead.
+#[test]
+fn nested_component_transforms_scale_inner_offsets() {
+    const SCALE_1_5: i16 = 0x6000; // F2DOT14
+
+    let data = font(vec![
+        diamond_leaf_glyph(),
+        composite_glyph(&[Component::translate(0, 10, 4)]),
+        composite_glyph(&[Component::scaled(1, 0, 0, SCALE_1_5)]),
+    ]);
+    let face = ttf_parser::Face::parse(&data, 0).unwrap();
+
+    let mut builder = Builder(String::new());
+    let bbox = face.outline_glyph(ttf_parser::GlyphId(2), &mut builder);
+
+    // (10,10) -> +(10,4) -> (20,14) -> *1.5 -> (30,21), and so on.
+    assert_eq!(builder.0, "M 30 21 L 60 21 L 60 51 L 30 21 Z ");
+    assert_eq!(bbox, Some(ttf_parser::Rect { x_min: 30, y_min: 21, x_max: 60, y_max: 51 }));
+}
+
+// The mirror image of the test above: within a single component record, dx/dy is applied
+// AFTER the component's own scale, so the offset is NOT scaled. Together the two tests pin
+// down the exact multiplication order of `Transform::combine` from both sides.
+#[test]
+fn a_components_own_offset_is_not_scaled_by_its_own_scale() {
+    const SCALE_1_5: i16 = 0x6000; // F2DOT14
+
+    let data = font(vec![
+        diamond_leaf_glyph(),
+        composite_glyph(&[Component::scaled(0, 10, 4, SCALE_1_5)]),
+    ]);
+    let face = ttf_parser::Face::parse(&data, 0).unwrap();
+
+    let mut builder = Builder(String::new());
+    let bbox = face.outline_glyph(ttf_parser::GlyphId(1), &mut builder);
+
+    // (10,10) -> *1.5 -> (15,15) -> +(10,4) -> (25,19), and so on.
+    assert_eq!(builder.0, "M 25 19 L 55 19 L 55 49 L 25 19 Z ");
+    assert_eq!(bbox, Some(ttf_parser::Rect { x_min: 25, y_min: 19, x_max: 55, y_max: 49 }));
+}
+
+// Component references form a graph, not a tree: glyphs 0 and 1 reference each other and
+// no simple glyph is ever reached. There is no cycle detection; the MAX_COMPONENTS depth
+// cap (32) is what terminates the recursion, and the `None` it produces propagates all the
+// way up, so the whole outline fails rather than returning a partial result.
+#[test]
+fn component_cycle_is_bounded_by_the_recursion_limit() {
+    let data = font(vec![
+        composite_glyph(&[Component::translate(1, 0, 0)]),
+        composite_glyph(&[Component::translate(0, 0, 0)]),
+    ]);
+    let face = ttf_parser::Face::parse(&data, 0).unwrap();
+
+    let mut builder = Builder(String::new());
+    let bbox = face.outline_glyph(ttf_parser::GlyphId(0), &mut builder);
+
+    assert_eq!(bbox, None);
+    // No simple glyph exists in the cycle, so not a single segment was emitted.
+    assert_eq!(builder.0, "");
+}
+
+// Three flavors of "no outline": a glyph header with zero contours, a zero-length
+// `loca` range (how real fonts encode empty glyphs), and a glyph ID past the end
+// of `loca`. All must return `None` without emitting anything.
+#[test]
+fn glyphs_without_outlines_return_none() {
+    let mut zero_contours = Vec::new();
+    zero_contours.extend_from_slice(&0i16.to_be_bytes()); // numberOfContours == 0
+    zero_contours.extend_from_slice(&[0u8; 8]);           // bbox
+
+    let data = font(vec![zero_contours, Vec::new()]);
+    let face = ttf_parser::Face::parse(&data, 0).unwrap();
+
+    for glyph_id in [0, 1, 5] {
+        let mut builder = Builder(String::new());
+        let bbox = face.outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder);
+        assert_eq!(bbox, None, "glyph {} should have no outline", glyph_id);
+        assert_eq!(builder.0, "", "glyph {} emitted segments", glyph_id);
+    }
+}
+
+// `outline_glyph` computes the bbox from the outlined points and ignores the bbox stored
+// in the glyph header, which can be malformed. The stored bbox is still reachable via
+// `glyf::Table::bbox` — the two are different contracts and must not be conflated.
+#[test]
+fn outline_computes_the_bbox_and_ignores_the_stored_one() {
+    let data = font(vec![diamond_leaf_glyph_with_stored_bbox(0, 0, 1000, 1000)]);
+    let face = ttf_parser::Face::parse(&data, 0).unwrap();
+
+    let mut builder = Builder(String::new());
+    let bbox = face.outline_glyph(ttf_parser::GlyphId(0), &mut builder);
+
+    assert_eq!(bbox, Some(ttf_parser::Rect { x_min: 10, y_min: 10, x_max: 30, y_max: 30 }));
+
+    let stored = face.tables().glyf.and_then(|glyf| glyf.bbox(ttf_parser::GlyphId(0)));
+    assert_eq!(stored, Some(ttf_parser::Rect { x_min: 0, y_min: 0, x_max: 1000, y_max: 1000 }));
 }
