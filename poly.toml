@@ -1,0 +1,199 @@
+# poly configuration for harfbuzz/ttf-parser.
+#
+# Design goals, in priority order:
+#   1. The `uncomment` engine can never destroy a comment in this repo. This
+#      crate's comments encode OpenType/TrueType specification detail that
+#      cannot be re-derived from the code. See the [lint.uncomment] and
+#      [per-file-ignores] sections below — they are belt AND braces.
+#   2. Nothing outside this repository can change poly's behaviour here
+#      ([workspace] root = true).
+#   3. Generated, vendored and non-Rust auxiliary trees are left alone.
+
+[workspace]
+# Stop the upward config cascade at this file. Without it, poly walks parent
+# directories looking for a poly.toml; a config in ~/workspace/ would silently
+# apply to this repo. (`.git` is an implicit boundary too, but being explicit
+# costs nothing and documents the intent.)
+root = true
+
+
+# ---------------------------------------------------------------------------
+# Comment safety — the non-negotiable part of this config.
+# ---------------------------------------------------------------------------
+#
+# The `uncomment` engine is opt-in and already defaults to `enabled = false`
+# (poly-core/src/engines/uncomment.rs: `flag(cfg, "enabled", false)`), and its
+# findings are Severity::Warning, which never fails `poly lint`
+# (poly-cli/src/lib.rs::lint_has_errors only counts Severity::Error).
+#
+# We still pin it off explicitly, because the default is a code default and a
+# future poly release could flip it. An explicit `false` here is the value that
+# a per-language `[lint.rust.uncomment]` table would have to deliberately
+# override in this same file.
+[lint.uncomment]
+enabled = false
+remove_todos = false
+remove_fixme = false
+remove_docs = false
+
+# Even if `enabled` were somehow flipped to true, these markers are honoured
+# unconditionally by the engine and keep the annotated comments.
+preserve_patterns = ["~keep", "SPEC", "spec", "By the spec", "TODO", "FIXME", "SAFETY", "NOTE"]
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+[discovery]
+exclude = [
+  "target/**",
+  "**/target/**",
+
+  # cbindgen-generated and then hand-edited (see c-api/README.md). Formatting it
+  # would fight the next regeneration.
+  "c-api/ttfparser.h",
+
+  # Meson wrap files are INI, not TOML, despite looking TOML-ish. Excluded so no
+  # current or future TOML glob can claim them.
+  "benches/outline/subprojects/**",
+  "**/*.wrap",
+
+  # Binary font fixtures and the wasm demo's assets.
+  "tests/fonts/**",
+  "examples/wasm/**",
+  "benches/fonts/**",
+  "**/*.ttf",
+  "**/*.ttc",
+  "**/*.otf",
+  "**/*.woff",
+  "**/*.woff2",
+
+  # Qt/C++ viewer: mainwindow.ui is XML, font-view.pro is qmake, and none of it
+  # is built by CI. Reformatting it is pure churn on code we do not compile.
+  "testing-tools/font-view/**",
+
+  # Append-only historical record. Reformatting or re-wrapping it destroys the
+  # correspondence with published releases.
+  "CHANGELOG.md",
+
+  # Hand-built binary fixtures, where one source line is one logical record and the
+  # trailing comment names that record:
+  #
+  #     UInt8(10), UInt8(15), UInt8(20), UInt8(25), // color 0
+  #
+  # A formatter puts each literal on its own line, which detaches the comment from
+  # the group it annotates and destroys the line-to-record correspondence that makes
+  # these checkable against a spec table. Measured cost of formatting them: +1968
+  # /-1030 lines, roughly doubling the files. This is why every module in
+  # tests/tables/main.rs is declared `#[rustfmt::skip] mod x;`; poly formats each
+  # file on its own and so never sees that attribute.
+  "tests/tables/**",
+]
+
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+[defaults]
+line_ending = "lf"
+final_newline = true
+trim_trailing_whitespace = true
+
+
+# ---------------------------------------------------------------------------
+# typos — font vocabulary
+# ---------------------------------------------------------------------------
+#
+# NOTE: poly does NOT read `[package.metadata.typos]` from Cargo.toml. It reads
+# native `_typos.toml` / `.typos.toml`, plus this table. Verified empirically:
+# `loca`, `trak` and `wdth` are all flagged on the current tree despite being
+# listed in Cargo.toml's metadata. The Cargo.toml entries are mirrored here.
+#
+# Identity mappings (`x = "x"`) tell typos the word is correct as written.
+[lint.typos.extend_words]
+# Mirrored from Cargo.toml [package.metadata.typos.default.extend-words]
+loca = "loca"
+ot = "ot"
+trak = "trak"
+wdth = "wdth"
+
+# OpenType/TrueType/AAT table tags and axis tags that collide with the typo
+# dictionary or read as truncated English.
+avar = "avar"
+cmap = "cmap"
+cvar = "cvar"
+feat = "feat"
+fvar = "fvar"
+glyf = "glyf"
+gpos = "gpos"
+gsub = "gsub"
+gvar = "gvar"
+hhea = "hhea"
+hmtx = "hmtx"
+kern = "kern"
+maxp = "maxp"
+morx = "morx"
+nam = "nam"
+opsz = "opsz"
+post = "post"
+sbix = "sbix"
+slnt = "slnt"
+vhea = "vhea"
+vmtx = "vmtx"
+vorg = "vorg"
+wght = "wght"
+
+# Font-domain identifiers and abbreviations used throughout src/.
+iso = "iso"
+ime = "ime"
+ligature = "ligature"
+mata = "mata"
+serie = "serie"
+strat = "strat"
+
+[lint.typos]
+# Font tags appear in doc-comment table links and URLs; do not lint those.
+extend_ignore_re = ["https?://[^\\s)]*"]
+
+
+# ---------------------------------------------------------------------------
+# rumdl — Markdown (9 files)
+# ---------------------------------------------------------------------------
+[lint.markdown.rumdl]
+ignore = [
+  # Badge rows and centred blocks in README.md legitimately use inline HTML.
+  "MD033",
+  # Several READMEs open with a badge row or an intro paragraph rather than an
+  # H1. Restructuring them is a docs decision, not a lint decision.
+  "MD041",
+]
+
+# NOTE: rumdl's line-length rule (MD013) is in poly's default-disabled set, and
+# the formatter does not reflow prose — measured Markdown churn on the current
+# tree is 5 lines in README.md. No `line_length` override is needed here.
+
+
+# ---------------------------------------------------------------------------
+# Per-file ignores — the durable backstop.
+# ---------------------------------------------------------------------------
+#
+# Precedence note: `[per-file-ignores]` is applied in the runner AFTER all
+# config merging, and — critically — BEFORE fix edits are collected
+# (poly-core/src/runner.rs::lint_one calls `suppress(&mut diagnostics)` before
+# building `edit_groups`, and again after every fix pass). A suppressed
+# diagnostic therefore carries no fix, so `poly lint --fix` cannot act on it.
+# This holds even if some future config, CLI flag or default flips
+# `[lint.uncomment] enabled` to true.
+#
+# Matching is on `Diagnostic.code`, not on the engine name. The uncomment engine
+# emits code `"comment"` for ordinary comments and `"doc-comment"` for doc
+# comments (uncomment.rs), so BOTH must be listed — `"uncomment"` alone would
+# match nothing, and `"comment"` does not prefix-match `"doc-comment"`.
+[per-file-ignores]
+"**/*.rs" = ["comment", "doc-comment"]
+"**/*.c" = ["comment", "doc-comment"]
+"**/*.h" = ["comment", "doc-comment"]
+"**/*.py" = ["comment", "doc-comment"]
+"**/*.toml" = ["comment", "doc-comment"]
+"**/*.yml" = ["comment", "doc-comment"]
+"**/*.yaml" = ["comment", "doc-comment"]
