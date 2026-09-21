@@ -16,12 +16,13 @@
 #[rustfmt::skip] mod head;
 #[rustfmt::skip] mod hmtx;
 #[rustfmt::skip] mod loca;
+#[rustfmt::skip] mod outline_glyph;
 #[rustfmt::skip] mod maxp;
 #[rustfmt::skip] mod panose;
 #[rustfmt::skip] mod sbix;
 #[rustfmt::skip] mod trak;
 
-use ttf_parser::{fonts_in_collection, Face, FaceParsingError};
+use ttf_parser::{Face, FaceParsingError, fonts_in_collection};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy)]

@@ -54,6 +54,13 @@ Requires Rust 1.88 and uses edition 2024.
 - Most of arithmetic operations are checked.
 - Most of numeric casts are checked.
 
+### Internal docs
+
+- [`docs/outline-glyph.md`](docs/outline-glyph.md) — branch-by-branch anatomy of
+  `Face::outline_glyph`: table selection, `OutlineBuilder` callback ordering, the three
+  bounding-box contracts, recursion/resource limits, eager vs lazy bounds checks, and
+  complexity. Paired with the `outline_glyph` characterization tests.
+
 ### License
 
 Licensed under either of
